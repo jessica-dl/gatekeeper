@@ -2,6 +2,7 @@ package webhook
 
 import (
 	"context"
+	"net/http"
 
 	opa "github.com/open-policy-agent/frameworks/constraint/pkg/client"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
@@ -51,19 +52,80 @@ var _ admission.Handler = &mutationHandler{}
 type mutationHandler struct {
 	opa     opa.Client
 	client  client.Client
+	decoder atypes.Decoder
 }
 
 func mutatePods(ctx context.Context, pod *corev1.Pod) error {
-	// do some things
+	log.Info("Trying to mutate pod", "object", pod)
+	if pod.Labels == nil {
+			pod.Labels = map[string]string{}
+	}
+	pod.Labels["someLabel"] = "jessicadl"
 	return nil
 }
 
 // Apply mutations to input objects
 func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes.Response {
 	log := log.WithValues("hookType", "mutation")
-	log.Info("(Not) mutating", "object", req.AdmissionRequest.Object)
+	defer log.Info("Finished mutating")
 
-	mResp := admission.ValidationResponse(true, "accept all")
+	mResp := admission.ValidationResponse(false, "default")
+
+	log.Info("About to create pod var")
+	pod := &corev1.Pod{}
+	log.Info("Created pod var")
+	err := h.decoder.Decode(req, pod)
+	if err != nil {
+		log.Info("Decoding failed.")
+		mResp.Response.Result.Code = http.StatusBadRequest
+	}
+	patchObj := pod.DeepCopy()
+
+	err = mutatePods(ctx, patchObj)
+	if err != nil {
+		log.Info("Could not apply mutations.")
+		mResp.Response.Result.Code = http.StatusInternalServerError
+	}
+	log.Info("mutated pods")
+	mResp = admission.PatchResponse(pod, patchObj)
 
 	return mResp
 }
+
+/*
+func isGkServiceAccount(user authenticationv1.UserInfo) bool {
+	saGroup := fmt.Sprintf("system:serviceaccounts:%s", namespace)
+	for _, g := range user.Groups {
+		if g == saGroup {
+			return true
+		}
+	}
+	return false
+}
+
+// validateGatekeeperResources returns whether an issue is user error (vs internal) and any errors
+// validating internal resources
+func (h *mutationHandler) validateGatekeeperResources(ctx context.Context, req atypes.Request) (bool, error) {
+	if req.AdmissionRequest.Kind.Group == "templates.gatekeeper.sh" && req.AdmissionRequest.Kind.Kind == "MutationTemplate" {
+		return h.validateTemplate(ctx, req)
+	}
+
+	// find out what this is named (mutations.gatekeeper.sh?)
+	if req.AdmissionRequest.Kind.Group == "constraints.gatekeeper.sh" {
+		return h.validateConstraint(ctx, req)
+	}
+
+	return false, nil
+}
+
+func (h *mutationHandler) validateTemplate(ctx context.Context, req atypes.Request) (bool, error) {
+	templ := &templv1alpha1.MutationTemplate{}
+	if _, _, err := deserializer.Decode(req.AdmissionRequest.Object.Raw, nil, templ); err != nil {
+		return false, err
+	}
+	if _, err := h.opa.CreateCRD(ctx, templ); err != nil {
+		return true, err
+	}
+	return false, nil
+}
+*/
