@@ -46,7 +46,7 @@ func AddValidatingWebhook(mgr manager.Manager, opa opa.Client) (webhook.Webhook,
 				Resources:   []string{"*"},
 			},
 		}).
-		Handlers(&validationHandler{opa: opa, client: mgr.GetClient()}).
+		Handlers(&validationHandler{opa: opa, k8s: mgr.GetClient()}).
 		WithManager(mgr).
 		Build()
 
@@ -61,7 +61,7 @@ var _ admission.Handler = &validationHandler{}
 
 type validationHandler struct {
 	opa    opa.Client
-	client client.Client
+	k8s client.Client
 
 	// for testing
 	injectedConfig *v1alpha1.Config
@@ -137,11 +137,11 @@ func (h *validationHandler) getConfig(ctx context.Context) (*v1alpha1.Config, er
 	if h.injectedConfig != nil {
 		return h.injectedConfig, nil
 	}
-	if h.client == nil {
+	if h.k8s == nil {
 		return nil, errors.New("no client available to retrieve validation config")
 	}
 	cfg := &v1alpha1.Config{}
-	return cfg, h.client.Get(ctx, config.CfgKey, cfg)
+	return cfg, h.k8s.Get(ctx, config.CfgKey, cfg)
 }
 
 func isGkServiceAccount(user authenticationv1.UserInfo) bool {

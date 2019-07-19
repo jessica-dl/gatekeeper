@@ -36,7 +36,7 @@ func AddMutatingWebhook(mgr manager.Manager, opa opa.Client) (webhook.Webhook, e
 				Resources:   []string{"*"},
 			},
 		}).
-		Handlers(&mutationHandler{opa: opa, client: mgr.GetClient()}).
+		Handlers(&mutationHandler{opa: opa, k8s: mgr.GetClient()}).
 		WithManager(mgr).
 		Build()
 
@@ -51,7 +51,7 @@ var _ admission.Handler = &mutationHandler{}
 
 type mutationHandler struct {
 	opa     opa.Client
-	client  client.Client
+	k8s  client.Client
 	decoder atypes.Decoder
 }
 
