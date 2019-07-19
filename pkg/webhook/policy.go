@@ -130,6 +130,7 @@ func (h *validationHandler) Handle(ctx context.Context, req atypes.Request) atyp
 		return vResp
 	}
 
+	log.Info("Accepted.")
 	return admission.ValidationResponse(true, "")
 }
 

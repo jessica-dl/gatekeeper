@@ -36,7 +36,7 @@ func AddMutatingWebhook(mgr manager.Manager, opa opa.Client) (webhook.Webhook, e
 				Resources:   []string{"*"},
 			},
 		}).
-		Handlers(&mutationHandler{opa: opa, k8s: mgr.GetClient()}).
+		Handlers(&mutationHandler{opa: opa, k8s: mgr.GetClient(), decoder: mgr.GetAdmissionDecoder()}).
 		WithManager(mgr).
 		Build()
 
@@ -69,14 +69,14 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 	log := log.WithValues("hookType", "mutation")
 	defer log.Info("Finished mutating")
 
-	mResp := admission.ValidationResponse(false, "default")
 
 	pod := &corev1.Pod{}
-	log.Info("Attempt to decode")
-	err := h.decoder.Decode(req, pod)
+	_, _, err := deserializer.Decode(req.AdmissionRequest.Object.Raw, nil, pod)
 	if err != nil {
-		log.Info("Decoding failed.")
+		log.Info("Decoding failed.", "error", err)
+	  mResp := admission.ValidationResponse(false, "failed to decode")
 		mResp.Response.Result.Code = http.StatusBadRequest
+		return mResp
 	}
 
 	patchObj := pod.DeepCopy()
@@ -84,9 +84,13 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 	err = mutatePods(ctx, patchObj)
 	if err != nil {
 		log.Info("Could not apply mutations.")
+		mResp := admission.ValidationResponse(false, "error applying mutations")
 		mResp.Response.Result.Code = http.StatusInternalServerError
+		return mResp
 	}
+
 	log.Info("mutated pods")
+	mResp := admission.ValidationResponse(true, "successfully mutated pods")
 	mResp = admission.PatchResponse(pod, patchObj)
 
 	return mResp
