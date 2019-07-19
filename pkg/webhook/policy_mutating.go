@@ -19,7 +19,7 @@ func init() {
 	CreateWebhookFuncs = append(CreateWebhookFuncs, AddMutatingWebhook)
 }
 
-// AddMutatingWebhook registers the mutating webhook server with the manager
+// AddMutatingWebhook creates the mutating webhook
 // below: notations add permissions kube-mgmt needs. Access cannot yet be restricted on a namespace-level granularity
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 // +kubebuilder:rbac:groups=,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
@@ -51,7 +51,7 @@ var _ admission.Handler = &mutationHandler{}
 
 type mutationHandler struct {
 	opa     opa.Client
-	k8s  client.Client
+	k8s     client.Client
 	decoder atypes.Decoder
 }
 
@@ -71,14 +71,14 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 
 	mResp := admission.ValidationResponse(false, "default")
 
-	log.Info("About to create pod var")
 	pod := &corev1.Pod{}
-	log.Info("Created pod var")
+	log.Info("Attempt to decode")
 	err := h.decoder.Decode(req, pod)
 	if err != nil {
 		log.Info("Decoding failed.")
 		mResp.Response.Result.Code = http.StatusBadRequest
 	}
+
 	patchObj := pod.DeepCopy()
 
 	err = mutatePods(ctx, patchObj)

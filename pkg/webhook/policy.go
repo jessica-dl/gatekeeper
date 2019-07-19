@@ -29,7 +29,7 @@ func init() {
 	CreateWebhookFuncs = append(CreateWebhookFuncs, AddValidatingWebhook)
 }
 
-// AddValidatingWebhook registers the validating webhook server with the manager
+// AddValidatingWebhook creates the validating webhook
 // below: notations add permissions kube-mgmt needs. Access cannot yet be restricted on a namespace-level granularity
 // +kubebuilder:rbac:groups=*,resources=*,verbs=get;list;watch
 // +kubebuilder:rbac:groups=,resources=configmaps,verbs=get;list;watch;create;update;patch;delete
