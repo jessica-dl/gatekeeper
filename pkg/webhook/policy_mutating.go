@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 	"strings"
-	"fmt"
 
 	opa "github.com/open-policy-agent/frameworks/constraint/pkg/client"
 	admissionregistrationv1beta1 "k8s.io/api/admissionregistration/v1beta1"
@@ -14,6 +13,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission/builder"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -46,7 +46,6 @@ func AddMutatingWebhook(mgr manager.Manager, opa opa.Client) (webhook.Webhook, e
 		Handlers(&mutationHandler{opa: opa, k8s: mgr.GetClient(), cfg: mgr.GetConfig(), decoder: mgr.GetAdmissionDecoder()}).
 		WithManager(mgr).
 		Build()
-
 	if err != nil {
 		return nil, err
 	}
@@ -61,15 +60,6 @@ type mutationHandler struct {
 	k8s     client.Client
 	cfg     *rest.Config
 	decoder atypes.Decoder
-}
-
-func dummyMutation(ctx context.Context, pod *corev1.Pod) error {
-	log.Info("Trying to mutate pod", "object", pod)
-	if pod.Labels == nil {
-			pod.Labels = map[string]string{}
-	}
-	pod.Labels["someLabel"] = "jessicadl"
-	return nil
 }
 
 func addPodLabel(ctx context.Context, pod *corev1.Pod, key string, deflt string) error {
@@ -90,24 +80,43 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 		return admission.ValidationResponse(true, "Gatekeeper does not self-manage")
 	}
 
-	_, err := h.getAllCRs(ctx)
+	crs, err := h.getAllCRs(ctx)
 	if err != nil {
 		log.Info("Failed to get CRs", "error", err)
+		mResp := admission.ValidationResponse(true, err.Error())
+		mResp.Response.Result.Code = http.StatusBadRequest
+		return mResp
 	}
 
 	pod := &corev1.Pod{}
 	_, _, err = deserializer.Decode(req.AdmissionRequest.Object.Raw, nil, pod)
 	if err != nil {
-		log.Info("Decoding failed.", "error", err)
-	  mResp := admission.ValidationResponse(true, err.Error())
+		log.Info("Decoding failed.", "error", err.Error())
+		mResp := admission.ValidationResponse(true, err.Error())
 		mResp.Response.Result.Code = http.StatusBadRequest
 		return mResp
 	}
 
+	defVal := ""
+	for ctKind, crList := range crs {
+		log.Info("CT", "object" ,ctKind)
+		for _, c := range crList.Items {
+			log.Info("mutation obj", "object", c)
+			rule, ok, err := unstructured.NestedString(c.Object, "spec", "parameters", "mutations", "foo")
+			if err != nil {
+				log.Info("Unable to access object fields", "error", err.Error())
+			}
+			if ok {
+				defVal = rule
+				log.Info("Nested labels", "object", rule)
+			}
+		}
+	}
+
 	patchObj := pod.DeepCopy()
-	err = addPodLabel(ctx, patchObj, "jessicadl", "foo")
+	err = addPodLabel(ctx, patchObj, "jessicadl", defVal)
 	if err != nil {
-		log.Info("Could not apply mutations", "error", err)
+		log.Info("Could not apply mutations", "error", err.Error())
 		mResp := admission.ValidationResponse(true, err.Error())
 		mResp.Response.Result.Code = http.StatusInternalServerError
 		return mResp
@@ -122,25 +131,27 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 func (h *mutationHandler) getAllConstraintKinds() (*metav1.APIResourceList, error) {
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(h.cfg)
 	if err != nil {
+		log.Info("Failed to create discovery client", "error", err.Error())
 		return nil, err
 	}
-	return discoveryClient.ServerResourcesForGroupVersion("constraints.gatekeeper.sh/v1alpha1")
+	return discoveryClient.ServerResourcesForGroupVersion("mutations.gatekeeper.sh/v1alpha1")
 }
 
-func (h *mutationHandler) getAllCRs(ctx context.Context) (map[string]unstructured.Unstructured, error) {
+func (h *mutationHandler) getAllCRs(ctx context.Context) (map[string]unstructured.UnstructuredList, error) {
 	crResources, err := h.getAllConstraintKinds()
 	if err != nil {
+		log.Info("Unable to get CRD kinds", "error", err.Error())
 		return nil, err
 	}
 
 	resourceGV := strings.Split(crResources.GroupVersion, "/")
 	group := resourceGV[0]
 	version := resourceGV[1]
-	// constraintList := make(map[string]unstructured.UnstructuredList, len(crResources.APIResources))
+	constraintList := make(map[string]unstructured.UnstructuredList, len(crResources.APIResources))
 
 	// get constraints for each Kind
 	for _, r := range crResources.APIResources {
-		log.Info("constraint", "resource kind", r.Kind)
+		log.Info("mutation", "resource kind", r.Kind)
 		constraintGvk := schema.GroupVersionKind{
 			Group:   group,
 			Version: version,
@@ -150,15 +161,10 @@ func (h *mutationHandler) getAllCRs(ctx context.Context) (map[string]unstructure
 		instanceList.SetGroupVersionKind(constraintGvk)
 		err := h.k8s.List(ctx, &client.ListOptions{}, instanceList)
 		if err != nil {
+			log.Info("Unable to list CRs", "error", err.Error())
 			return nil, err
 		}
-		log.Info("constraint", "count of constraints", len(instanceList.Items))
-		constraints := make(map[string]unstructured.Unstructured, len(instanceList.Items))
-		// get each constraint
-		for _, item := range instanceList.Items {
-			log.Info("item type", fmt.Sprintf("%T", item))
-			constraints[item.GetSelfLink()] = item
-		}
+		constraintList[r.Kind] = *instanceList
 	}
-	return nil, nil
+	return constraintList, nil
 }
