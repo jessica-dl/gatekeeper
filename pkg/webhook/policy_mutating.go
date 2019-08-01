@@ -13,7 +13,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission/builder"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
-
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/discovery"
 	"k8s.io/client-go/rest"
@@ -80,6 +79,18 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 		return admission.ValidationResponse(true, "Gatekeeper does not self-manage")
 	}
 
+	// Decode object into Pod type
+	pod := &corev1.Pod{}
+	_, _, err := deserializer.Decode(req.AdmissionRequest.Object.Raw, nil, pod)
+	if err != nil {
+		log.Info("Decoding failed.", "error", err.Error())
+		mResp := admission.ValidationResponse(true, err.Error())
+		mResp.Response.Result.Code = http.StatusBadRequest
+		return mResp
+	}
+	patchObj := pod.DeepCopy()
+
+	// Access list of existing CRs
 	crs, err := h.getAllCRs(ctx)
 	if err != nil {
 		log.Info("Failed to get CRs", "error", err)
@@ -88,38 +99,33 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 		return mResp
 	}
 
-	pod := &corev1.Pod{}
-	_, _, err = deserializer.Decode(req.AdmissionRequest.Object.Raw, nil, pod)
-	if err != nil {
-		log.Info("Decoding failed.", "error", err.Error())
-		mResp := admission.ValidationResponse(true, err.Error())
-		mResp.Response.Result.Code = http.StatusBadRequest
-		return mResp
-	}
-
-	defVal := ""
-	for ctKind, crList := range crs {
-		log.Info("CT", "object" ,ctKind)
+	// Extract mutation information from CR and apply mutation to pods
+	for _, crList := range crs {
 		for _, c := range crList.Items {
-			log.Info("mutation obj", "object", c)
-			rule, ok, err := unstructured.NestedString(c.Object, "spec", "parameters", "mutations", "foo")
+			muts, ok, err := unstructured.NestedSlice(c.Object, "spec", "parameters", "mutations")
 			if err != nil {
 				log.Info("Unable to access object fields", "error", err.Error())
 			}
 			if ok {
-				defVal = rule
-				log.Info("Nested labels", "object", rule)
+				for _, info := range muts {
+					var casted map[string]interface{}
+					casted = info.(map[string]interface{})
+
+					for key, val := range casted {
+						var value string
+						value = val.(string)
+
+						err = addPodLabel(ctx, patchObj, key, value)
+						if err != nil {
+							log.Info("Could not apply mutations", "error", err.Error())
+							mResp := admission.ValidationResponse(true, err.Error())
+							mResp.Response.Result.Code = http.StatusInternalServerError
+							return mResp
+						}
+					}
+				}
 			}
 		}
-	}
-
-	patchObj := pod.DeepCopy()
-	err = addPodLabel(ctx, patchObj, "jessicadl", defVal)
-	if err != nil {
-		log.Info("Could not apply mutations", "error", err.Error())
-		mResp := admission.ValidationResponse(true, err.Error())
-		mResp.Response.Result.Code = http.StatusInternalServerError
-		return mResp
 	}
 
 	log.Info("Mutated.")
@@ -128,7 +134,8 @@ func (h *mutationHandler) Handle(ctx context.Context, req atypes.Request) atypes
 	return mResp
 }
 
-func (h *mutationHandler) getAllConstraintKinds() (*metav1.APIResourceList, error) {
+// get all CRD Kinds from Kubernetes
+func (h *mutationHandler) getAllCRDKinds() (*metav1.APIResourceList, error) {
 	discoveryClient, err := discovery.NewDiscoveryClientForConfig(h.cfg)
 	if err != nil {
 		log.Info("Failed to create discovery client", "error", err.Error())
@@ -138,7 +145,7 @@ func (h *mutationHandler) getAllConstraintKinds() (*metav1.APIResourceList, erro
 }
 
 func (h *mutationHandler) getAllCRs(ctx context.Context) (map[string]unstructured.UnstructuredList, error) {
-	crResources, err := h.getAllConstraintKinds()
+	crResources, err := h.getAllCRDKinds()
 	if err != nil {
 		log.Info("Unable to get CRD kinds", "error", err.Error())
 		return nil, err
@@ -149,7 +156,7 @@ func (h *mutationHandler) getAllCRs(ctx context.Context) (map[string]unstructure
 	version := resourceGV[1]
 	constraintList := make(map[string]unstructured.UnstructuredList, len(crResources.APIResources))
 
-	// get constraints for each Kind
+	// get CRs for each CRD Kind
 	for _, r := range crResources.APIResources {
 		log.Info("mutation", "resource kind", r.Kind)
 		constraintGvk := schema.GroupVersionKind{
